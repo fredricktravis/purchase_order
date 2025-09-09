@@ -88,7 +88,6 @@
       <label class="logo-box" id="logoBox">Upload Logo</label>
       <div class="company-info">
         <div class="company-name" id="companyName" contenteditable="true">[Company Name]</div>
-        <div class="address" id="companyAddress">[Street Address]\n[City, ST ZIP]\nPhone: (000) 000-0000</div>
       </div>
     </div>
     <div class="right-head">
@@ -176,6 +175,197 @@
 
 <script>
 // (JS logic same as previous version — auto rows, totals, preview, send menu, pdf export, success modal, reset+increment PO)
+// Helpers
+const $ = id => document.getElementById(id);
+function fmtDate(d){ return String(d.getDate()).padStart(2,'0') + '/' + String(d.getMonth()+1).padStart(2,'0') + '/' + d.getFullYear(); }
+function poKey(){ return 'sixtiq_po_' + new Date().getFullYear(); }
+function nextPO(){ let k = poKey(); let n = parseInt(localStorage.getItem(k) || '0',10) + 1; localStorage.setItem(k,String(n)); return 'PO-' + new Date().getFullYear() + '-' + String(n).padStart(4,'0'); }
+function incrementPO(){ let k = poKey(); let n = parseInt(localStorage.getItem(k) || '0',10) + 1; localStorage.setItem(k,String(n)); }
+
+// Elements
+const logoUpload = $('logoUpload'), logoInput = $('logoInput'), companyName = $('companyName');
+const poDate = $('poDate'), poNumber = $('poNumber'), currency = $('currency');
+const itemsBody = $('itemsBody'), addBtn = $('addBtn');
+const taxInput = $('taxInput'), shipInput = $('shipInput'), otherInput = $('otherInput');
+const subTotal = $('subTotal'), grandTotal = $('grandTotal'), comments = $('comments');
+const previewBtn = $('previewBtn'), overlay = $('overlay'), modalBody = $('modalBody');
+const sendBtn = $('sendBtn'), sendMenu = $('sendMenu'), backBtn = $('backBtn'), closePreview = $('closePreview');
+const success = $('success'), successText = $('successText');
+
+let logoData = null;
+
+// Init
+function init(){
+  poDate.value = fmtDate(new Date());
+  poNumber.value = nextPO();
+  addItem(); addItem();
+  bind();
+  recalc();
+}
+function bind(){
+  logoUpload.addEventListener('click', ()=> logoInput.click());
+  logoInput.addEventListener('change', onLogo);
+  addBtn.addEventListener('click', addItem);
+  itemsBody.addEventListener('input', e => { const r = e.target.closest('.item-row'); if(r) updateRow(r); });
+  itemsBody.addEventListener('click', e => { if(e.target.classList.contains('del')){ e.target.closest('.item-row').remove(); recalc(); } });
+  [taxInput, shipInput, otherInput, currency].forEach(el => el && el.addEventListener('input', recalc));
+  previewBtn.addEventListener('click', openPreview);
+  backBtn.addEventListener('click', closePreview);
+  closePreview.addEventListener('click', closePreview);
+  sendBtn.addEventListener('click', toggleSendMenu);
+  document.addEventListener('click', e => { if(!sendMenu.contains(e.target) && !sendBtn.contains(e.target)) sendMenu.style.display = 'none'; });
+  sendMenu.querySelectorAll('div').forEach(opt => opt.addEventListener('click', onSendOption));
+}
+function onLogo(e){
+  const f = e.target.files && e.target.files[0];
+  if(!f) return;
+  const reader = new FileReader();
+  reader.onload = () => { logoData = reader.result; renderLogo(); };
+  reader.readAsDataURL(f);
+}
+function renderLogo(){ if(logoData) logoUpload.innerHTML = '<img src="'+logoData+'" alt="logo">'; else logoUpload.innerHTML = 'Upload Logo'; }
+
+// Items
+function addItem(){
+  const row = document.createElement('div');
+  row.className = 'item-row';
+  row.innerHTML = '<input class="idx" placeholder="Item#">' +
+                  '<input class="desc" placeholder="Description" style="flex:1">' +
+                  '<input class="qty" type="number" value="1" style="width:70px">' +
+                  '<input class="price" type="number" value="0" style="width:100px">' +
+                  '<div class="amount">₦0.00</div>' +
+                  '<button class="del" title="Delete" style="background:none;border:none;cursor:pointer">🗑️</button>';
+  itemsBody.appendChild(row);
+  row.querySelectorAll('input').forEach(i=>i.addEventListener('input', ()=> updateRow(row)));
+}
+function updateRow(r){
+  const q = parseFloat(r.querySelector('.qty').value) || 0;
+  const p = parseFloat(r.querySelector('.price').value) || 0;
+  const a = q*p;
+  r.querySelector('.amount').textContent = (currency.value || '₦') + a.toFixed(2);
+  recalc();
+}
+function recalc(){
+  let sum = 0;
+  document.querySelectorAll('.item-row .amount').forEach(el => {
+    const v = parseFloat(el.textContent.replace(/[^0-9.-]+/g,'')) || 0;
+    sum += v; });
+  const taxPercent = parseFloat(taxInput.value) || 0; // user enters %
+  const taxAmount = (sum * taxPercent) / 100;         // calculate % of subtotal
+  const s = parseFloat(shipInput.value) || 0;         // flat shipping amount
+  const o = parseFloat(otherInput.value) || 0;        // flat other charges
+  const g = sum + taxAmount + s + o;
+
+  subTotal.textContent = (currency.value || '₦') + sum.toFixed(2);
+  grandTotal.textContent = (currency.value || '₦') + g.toFixed(2);
+}
+
+// Preview & PDF
+function buildPreview(){
+  const vendor = {name: $('vendorName').value, addr: $('vendorAddress').value, phone: $('vendorPhone').value};
+  const ship = {name: $('shipName').value, addr: $('shipAddress').value, phone: $('shipPhone').value};
+  const rows = Array.from(document.querySelectorAll('.item-row')).map(r => ({
+    idx: r.querySelector('.idx').value,
+    desc: r.querySelector('.desc').value,
+    qty: r.querySelector('.qty').value,
+    price: r.querySelector('.price').value,
+    amt: r.querySelector('.amount').textContent
+  }));
+  const sub = subTotal.textContent;
+  const taxPercent = parseFloat(taxInput.value)||0;
+  const s = parseFloat(shipInput.value)||0;
+  const o = parseFloat(otherInput.value)||0;
+  const grand = grandTotal.textContent;
+  const cur = currency.value || '₦';
+  const logoHtml = logoData ? '<img src="'+logoData+'" style="max-width:140px;max-height:70px;object-fit:contain">' : '<div style="width:140px;height:70px;border:1px solid #eee;display:flex;align-items:center;justify-content:center;color:#999">Logo</div>';
+  let rowsHtml = rows.map(r=>`<tr><td style="padding:6px">${escapeHtml(r.idx)}</td><td style="padding:6px">${escapeHtml(r.desc)}</td><td style="padding:6px">${r.qty}</td><td style="padding:6px;text-align:right">${parseFloat(r.price||0).toFixed(2)}</td><td style="padding:6px;text-align:right">${escapeHtml(r.amt)}</td></tr>`).join('');
+  return `
+    <div style="font-family:Open Sans,Arial;padding:12px;color:#111">
+      <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #111;padding-bottom:8px;margin-bottom:12px">
+        <div style="display:flex;gap:12px;align-items:center">${logoHtml}<div style="font-weight:800">${escapeHtml(companyName.value)}</div></div>
+        <div style="text-align:right"><div style="font-weight:900;color:${getComputedStyle(document.documentElement).getPropertyValue('--red') || '#e60000'}">PURCHASE ORDER</div><div style="font-size:13px">Date: ${escapeHtml(poDate.value)}</div><div style="font-size:13px">PO #: ${escapeHtml(poNumber.value)}</div></div>
+      </div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">
+        <div style="flex:1;min-width:200px;background:#fafafa;padding:10px;border-radius:6px;border:1px solid #eee"><strong style="color:${getComputedStyle(document.documentElement).getPropertyValue('--maroon') || '#550000'}">Vendor</strong><div>${escapeHtml(vendor.name)}</div><div style="font-size:13px;color:#555">${escapeHtml(vendor.addr)}</div><div style="font-size:13px;color:#555">${escapeHtml(vendor.phone)}</div></div>
+        <div style="flex:1;min-width:200px;background:#fafafa;padding:10px;border-radius:6px;border:1px solid #eee"><strong style="color:${getComputedStyle(document.documentElement).getPropertyValue('--maroon') || '#550000'}">Ship To</strong><div>${escapeHtml(ship.name)}</div><div style="font-size:13px;color:#555">${escapeHtml(ship.addr)}</div><div style="font-size:13px;color:#555">${escapeHtml(ship.phone)}</div></div>
+      </div>
+      <table style="width:100%;border-collapse:collapse;border:1px solid #e9e9e9"><thead style="background:#111;color:#fff"><tr><th style="padding:8px;text-align:left">Item #</th><th style="padding:8px;text-align:left">Description</th><th style="padding:8px;text-align:left">Qty</th><th style="padding:8px;text-align:right">Unit</th><th style="padding:8px;text-align:right">Total</th></tr></thead><tbody>${rowsHtml}</tbody></table>
+      <div style="display:flex;justify-content:flex-end;margin-top:10px"><div style="min-width:300px"><div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px dashed #eee"><span>Subtotal</span><span>${sub}</span></div><div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px dashed #eee"><span>Tax</span><span>${cur}${t.toFixed(2)}</span></div><div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px dashed #eee"><span>Shipping</span><span>${cur}${s.toFixed(2)}</span></div><div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px dashed #eee"><span>Other</span><span>${cur}${o.toFixed(2)}</span></div><div style="background:${getComputedStyle(document.documentElement).getPropertyValue('--maroon') || '#550000'};color:#fff;padding:10px;border-radius:6px;display:flex;justify-content:space-between;font-weight:800;margin-top:8px"><span>Grand Total</span><span>${grand}</span></div></div></div>
+      <div style="margin-top:12px"><strong style="color:${getComputedStyle(document.documentElement).getPropertyValue('--maroon') || '#550000'}">Comments</strong><div style="white-space:pre-wrap;margin-top:6px">${escapeHtml(comments.value)}</div></div>
+      <div style="text-align:center;color:${getComputedStyle(document.documentElement).getPropertyValue('--maroon') || '#550000'};font-weight:700;margin-top:14px">Powered by Sixtiq</div>
+    </div>
+  `;
+}
+function escapeHtml(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+async function openPreview(){
+  if(!companyName.value.trim()){ alert('Please enter company name'); companyName.focus(); return; }
+  const rows = document.querySelectorAll('.item-row');
+  if(rows.length===0){ alert('Add at least one item'); return; }
+  modalBody.innerHTML = buildPreview();
+  overlay.style.display = 'flex';
+}
+function closePreview(){ overlay.style.display = 'none'; sendMenu.style.display='none'; }
+
+function toggleSendMenu(){ sendMenu.style.display = (sendMenu.style.display === 'flex') ? 'none' : 'flex'; }
+
+async function onSendOption(e){
+  const action = e.currentTarget.getAttribute('data-action');
+  sendMenu.style.display = 'none';
+  if(action === 'download'){
+    await exportPDF_A4();
+    showSuccess('Purchase Order downloaded!');
+  } else {
+    showSuccess('Purchase Order sent!');
+  }
+  setTimeout(()=> resetForm(), 1200);
+}
+
+async function exportPDF_A4(){
+  const html = buildPreview();
+  const wrapper = document.createElement('div');
+  wrapper.style.width = '210mm';
+  wrapper.style.minHeight = '297mm';
+  wrapper.style.padding = '20px';
+  wrapper.style.background = '#fff';
+  wrapper.innerHTML = html;
+  document.body.appendChild(wrapper);
+  const canvas = await html2canvas(wrapper, {scale:2, useCORS:true, backgroundColor:'#ffffff'});
+  const imgData = canvas.toDataURL('image/png');
+  const { jsPDF } = window.jspdf;
+  const pdf = new jsPDF({unit:'pt', format:'a4'});
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const pdfWidth = pageWidth - 40;
+  const ratio = canvas.width / pdfWidth;
+  const pdfHeight = canvas.height / ratio;
+  pdf.addImage(imgData, 'PNG', 20, 20, pdfWidth, pdfHeight);
+  pdf.save((poNumber.value || 'purchase-order') + '.pdf');
+  document.body.removeChild(wrapper);
+}
+
+function showSuccess(msg){
+  successText.textContent = msg;
+  success.style.display = 'flex';
+  setTimeout(()=> { success.style.display = 'none'; }, 1200);
+}
+
+function resetForm(){
+  incrementPO();
+  companyName.value = '';
+  $('vendorName').value=''; $('vendorAddress').value=''; $('vendorPhone').value='';
+  $('shipName').value=''; $('shipAddress').value=''; $('shipPhone').value='';
+  comments.value='';
+  taxInput.value='0'; shipInput.value='0'; otherInput.value='0';
+  itemsBody.innerHTML=''; addItem(); addItem();
+  logoData = null; renderLogo();
+  recalc();
+  poDate.value = fmtDate(new Date());
+  poNumber.value = nextPO();
+  overlay.style.display = 'none';
+}
+
+init();
+  
 </script>
 </body>
+
 </html>
